@@ -3,6 +3,7 @@ use crate::task::{block_current_and_run_next, current_process, current_task};
 use crate::timer::{add_timer, get_time_ms};
 use alloc::sync::Arc;
 
+
 pub fn sys_sleep(ms: usize) -> isize {
     let expire_ms = get_time_ms() + ms;
     let task = current_task().unwrap();
@@ -12,6 +13,8 @@ pub fn sys_sleep(ms: usize) -> isize {
 }
 
 // LAB5 HINT: you might need to maintain data structures used for deadlock detection
+// 代码参考自https://github.com/LearningOS/lab5-os8-Yakkhini/blob/main/os8/src/syscall/sync.rs
+// an simple implement way for detecting deadlock
 // during sys_mutex_* and sys_semaphore_* syscalls
 pub fn sys_mutex_create(blocking: bool) -> isize {
     let process = current_process();
@@ -29,9 +32,11 @@ pub fn sys_mutex_create(blocking: bool) -> isize {
         .map(|(id, _)| id)
     {
         process_inner.mutex_list[id] = mutex;
+        process_inner.avilable[id] = 1;
         id as isize
     } else {
         process_inner.mutex_list.push(mutex);
+        process_inner.avilable.push(1);
         process_inner.mutex_list.len() as isize - 1
     }
 }
@@ -39,8 +44,14 @@ pub fn sys_mutex_create(blocking: bool) -> isize {
 // LAB5 HINT: Return -0xDEAD if deadlock is detected
 pub fn sys_mutex_lock(mutex_id: usize) -> isize {
     let process = current_process();
-    let process_inner = process.inner_exclusive_access();
+    let mut process_inner = process.inner_exclusive_access();
     let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
+    let det = process_inner.enable_det_deadlock;
+    if det && process_inner.avilable[mutex_id] == 0 {
+        return -0xDEAD;
+    } else {
+        process_inner.avilable[mutex_id] -= 1;
+    }
     drop(process_inner);
     drop(process);
     mutex.lock();
@@ -49,8 +60,9 @@ pub fn sys_mutex_lock(mutex_id: usize) -> isize {
 
 pub fn sys_mutex_unlock(mutex_id: usize) -> isize {
     let process = current_process();
-    let process_inner = process.inner_exclusive_access();
+    let mut process_inner = process.inner_exclusive_access();
     let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
+    process_inner.avilable[mutex_id] += 1;
     drop(process_inner);
     drop(process);
     mutex.unlock();
@@ -68,11 +80,13 @@ pub fn sys_semaphore_create(res_count: usize) -> isize {
         .map(|(id, _)| id)
     {
         process_inner.semaphore_list[id] = Some(Arc::new(Semaphore::new(res_count)));
+        process_inner.avilable[id] = res_count;
         id
     } else {
         process_inner
             .semaphore_list
             .push(Some(Arc::new(Semaphore::new(res_count))));
+        process_inner.avilable.push(res_count);
         process_inner.semaphore_list.len() - 1
     };
     id as isize
@@ -80,7 +94,8 @@ pub fn sys_semaphore_create(res_count: usize) -> isize {
 
 pub fn sys_semaphore_up(sem_id: usize) -> isize {
     let process = current_process();
-    let process_inner = process.inner_exclusive_access();
+    let mut process_inner = process.inner_exclusive_access();
+    process_inner.avilable[sem_id] += 1;
     let sem = Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap());
     drop(process_inner);
     sem.up();
@@ -90,8 +105,14 @@ pub fn sys_semaphore_up(sem_id: usize) -> isize {
 // LAB5 HINT: Return -0xDEAD if deadlock is detected
 pub fn sys_semaphore_down(sem_id: usize) -> isize {
     let process = current_process();
-    let process_inner = process.inner_exclusive_access();
+    let mut process_inner = process.inner_exclusive_access();
     let sem = Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap());
+    let det = process_inner.enable_det_deadlock;
+    if det && process_inner.avilable[sem_id] - 1 <= sem.inner.exclusive_access().wait_queue.len() {
+        return -0xDEAD;
+    } else {
+        process_inner.avilable[sem_id] -= 1;
+    }
     drop(process_inner);
     sem.down();
     0
@@ -138,6 +159,18 @@ pub fn sys_condvar_wait(condvar_id: usize, mutex_id: usize) -> isize {
 }
 
 // LAB5 YOUR JOB: Implement deadlock detection, but might not all in this syscall
-pub fn sys_enable_deadlock_detect(_enabled: usize) -> isize {
-    -1
+pub fn sys_enable_deadlock_detect(enabled: usize) -> isize {
+    let process = current_process();
+    let mut process_inner = process.inner_exclusive_access();
+    match enabled {
+        0 => {
+            process_inner.enable_det_deadlock = false;
+            0
+        },
+        1 => {
+            process_inner.enable_det_deadlock = true;
+            1
+        },
+        _ => -1,
+    }
 }
